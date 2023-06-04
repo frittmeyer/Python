@@ -1,0 +1,151 @@
+from flask import Flask, render_template, request, flash
+import pandas as pd
+from datetime import datetime
+import matplotlib.pyplot as plt
+import io
+import base64
+import os
+import matplotlib.patches as patches
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+app = Flask(__name__)
+app.secret_key = 'your_secret_key'
+
+
+def get_csv_file_path():
+    script_dir = os.getcwd()
+    return os.path.join(script_dir, 'life_expectancy.csv')
+
+
+def load_life_expectancy_data():
+    try:
+        csv_file_path = get_csv_file_path()
+
+        # Load the data from CSV file with custom column names
+        df = pd.read_csv(csv_file_path, names=['country', 'life_expectancy'])
+
+        # Verify the existence of the 'country' column
+        if 'country' not in df.columns:
+            raise ValueError("Missing 'country' column in the CSV file.")
+
+        # Convert 'country' column to string type
+        df['country'] = df['country'].astype(str)
+
+        # Convert 'life_expectancy' column to numeric values
+        df['life_expectancy'] = pd.to_numeric(df['life_expectancy'], errors='coerce')
+
+        return df
+    except FileNotFoundError:
+        flash("Error: The life expectancy data file 'life_expectancy.csv' is not found.")
+        return None
+    except Exception as e:
+        flash(f"An error occurred while loading the life expectancy data: {str(e)}")
+        return None
+
+
+def calculate_life_expectancy(birth_year, birth_month, country):
+    # Load the life expectancy data
+    life_expectancy_data = load_life_expectancy_data()
+
+    # Filter the data based on the country
+    life_expectancy_row = life_expectancy_data[life_expectancy_data['country'] == country]
+
+    # handle case where country is not found
+    if life_expectancy_row.empty:
+        raise ValueError("Country not found in the life expectancy data.")
+
+    # calculate the percentage of life lived and remaining
+    current_year = datetime.now().year
+    current_month = datetime.now().month
+    age = (current_year - birth_year) + (current_month - birth_month) / 12
+    life_expectancy = life_expectancy_row['life_expectancy'].iloc[0]  # Retrieve the life expectancy value from the row
+    percentage_lived = int(round(age / life_expectancy * 100))
+    percentage_remaining = 100 - percentage_lived
+
+    weeks_remaining = int(round((life_expectancy - age) * 52.143))
+
+    return percentage_lived, percentage_remaining, weeks_remaining
+
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        birth_year = request.form.get('birth_year')
+        birth_month = request.form.get('birth_month')
+        country = request.form.get('country')
+
+        # Check if any input is missing or not valid
+        if not birth_year or not birth_month or not country:
+            error_message = 'Please fill in all the fields to get a valid estimation.'
+            return render_template('index.html', error_message=error_message)
+
+        try:
+            birth_year = int(birth_year)
+            birth_month = int(birth_month)
+        except ValueError:
+            error_message = 'Please fill in all the fields to get a valid estimation.'
+            return render_template('index.html', error_message=error_message)
+
+        percentage_lived, percentage_remaining, weeks_remaining = calculate_life_expectancy(birth_year, birth_month, country)
+
+        if percentage_lived >= 100:
+            congratulations_message = f"Congratulations! You've surpassed the life expectancy of {country}. You're awesome and you're doing great."
+            chart_image = None
+            percentage_lived_message = None
+            weeks_remaining_message = None
+            weeks_remaining = None
+        else:
+            congratulations_message = None
+
+            # Set the chart size based on the device screen width
+            if request.user_agent.platform in ['android', 'iphone']:
+                chart_width = 7  # Adjust this value as needed for mobile devices
+            else:
+                chart_width = 8.5  # Default width for other devices
+
+            # Generate the bar chart
+            plt.figure(figsize=(chart_width, 1), dpi=80)
+            plt.barh(['Percentage Lived'], [percentage_lived], color='#1DA1F2')
+
+            # Set the x-axis limits to show the full 100% scale
+            plt.xlim(0, 100.5)
+
+            # Remove the axis label and ticks
+            plt.gca().get_yaxis().set_visible(False)
+            plt.gca().get_xaxis().set_visible(False)
+            plt.xticks([])
+
+            # Add borders to all sides of the horizontal bar chart
+            ax = plt.gca()  # Get the current axes
+            for spine in ax.spines.values():
+                spine.set_visible(True)  # Make all spines visible
+                spine.set_edgecolor('black')  # Set the color of the borders
+                spine.set_linewidth(1)  # Set the width of the borders
+
+            # Add percentage value annotation to the bar
+            plt.text(percentage_lived + 1, 0, f'{percentage_lived}%', va='center', fontsize=14)
+
+            # Save the chart to a buffer and convert to base64 encoding
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format='png', pad_inches=0)
+            buffer.seek(0)
+            chart_image = base64.b64encode(buffer.read()).decode('utf-8')
+
+            # Adjust the output message
+            percentage_lived_message = f"{percentage_lived}% of your life has passed."
+            weeks_remaining_message = f"You have about {weeks_remaining} weeks left."
+
+        # Pass the selected values, adjusted output message, and chart image back to the template
+        return render_template('index.html', birth_year=birth_year, birth_month=birth_month, country=country,
+                               percentage_lived=percentage_lived, percentage_remaining=percentage_remaining,
+                               percentage_lived_message=percentage_lived_message,
+                               weeks_remaining_message=weeks_remaining_message,
+                               weeks_remaining=weeks_remaining,
+                               chart_image=chart_image, error_message=None,
+                               congratulations_message=congratulations_message)
+    else:
+        return render_template('index.html')
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080, debug=True)
